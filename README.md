@@ -61,32 +61,10 @@ uv pip install -r requirements.txt
 
 ---
 
-## 🚀 Cloning & Pushing to GitHub
+## 🚀 Clone the Repository
 
-### 1. Clone the Repository
-If you are downloading or cloning this repository from GitHub for the first time:
+If you are downloading or cloning this repository from GitHub:
 ```bash
 git clone https://github.com/punithkrishnakeepudi/robotics-workshop.git
 cd robotics-workshop
-```
-
-### 2. Initializing & First Push to GitHub
-If you are setting up this local folder as a Git repository and pushing it to GitHub for the first time:
-
-```bash
-git init
-git add .
-git commit -m "Initial commit with workshop project files"
-git branch -M main
-git remote add origin https://github.com/punithkrishnakeepudi/robotics-workshop.git
-git push -u origin main
-```
-
-### 3. Pushing Future Updates
-Whenever you make modifications or add new files to the project, update your GitHub repository with:
-
-```bash
-git add .
-git commit -m "Update project files"
-git push origin main
 ```
