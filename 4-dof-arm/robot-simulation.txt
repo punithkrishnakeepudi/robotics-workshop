@@ -1,0 +1,550 @@
+/*
+   4-DOF ROBOTIC ARM — ESP8266 Access Point Controller  (optimized)
+
+  ---------------------------------------------------------------------
+  WIRING (NodeMCU pin labels)
+  ---------------------------------------------------------------------
+      Base     -> D1 (GPIO5)
+      Shoulder -> D2 (GPIO4)
+      Elbow    -> D5 (GPIO14)
+      Gripper  -> D6 (GPIO12)
+
+*/
+
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+#include <Servo.h>
+
+// =====================================================================
+// ACCESS POINT
+// =====================================================================
+const char *AP_SSID     = "RobotArm-4DOF";
+const char *AP_PASSWORD = "robotarm123";   // 8+ chars, or "" for open
+
+ESP8266WebServer server(80);
+
+// =====================================================================
+// JOINT TABLE  —  the single source of truth
+// Edit pins and limits HERE only; the web page reads them at load.
+// =====================================================================
+#define NUM_JOINTS 4
+
+enum { J_BASE = 0, J_SHOULDER, J_ELBOW, J_GRIPPER };
+
+const uint8_t     JOINT_PIN[NUM_JOINTS]  = { D1,     D2,         D5,      D6        };
+const char *const JOINT_NAME[NUM_JOINTS] = { "base", "shoulder", "elbow", "gripper" };
+const int         JOINT_MIN[NUM_JOINTS]  = {   0,     20,         10,      20       };
+const int         JOINT_MAX[NUM_JOINTS]  = { 180,    160,        170,     150       };
+const int         JOINT_HOME[NUM_JOINTS] = {  90,     90,         90,      90       };
+
+// Servo pulse range. 500-2400us gives SG90/MG90S their full travel;
+// the library default (544-2400) clips a few degrees at the low end.
+const int SERVO_MIN_US = 500;
+const int SERVO_MAX_US = 2400;
+
+Servo servos[NUM_JOINTS];
+int   currentAngle[NUM_JOINTS];   // where the servo actually is
+int   targetAngle[NUM_JOINTS];    // where the slider wants it
+
+// =====================================================================
+// MOTION SMOOTHING
+//   MAX_STEP_DEG / STEP_INTERVAL_MS = speed.
+//   3 deg per 15 ms  ~=  200 deg/sec  (smooth, low current spikes)
+//   Raise MAX_STEP_DEG for a snappier arm, lower it for a gentler one.
+// =====================================================================
+const int           MAX_STEP_DEG     = 3;
+const unsigned long STEP_INTERVAL_MS = 15;
+
+unsigned long lastStepMs = 0;
+bool servosAttached = false;
+
+// =====================================================================
+// SERVO HELPERS
+// =====================================================================
+void attachServos() {
+  if (servosAttached) return;
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    servos[i].attach(JOINT_PIN[i], SERVO_MIN_US, SERVO_MAX_US);
+    servos[i].write(currentAngle[i]);
+  }
+  servosAttached = true;
+}
+
+void detachServos() {
+  if (!servosAttached) return;
+  for (int i = 0; i < NUM_JOINTS; i++) servos[i].detach();
+  servosAttached = false;
+}
+
+// Called from loop(). Moves each joint a small step toward its target.
+void updateServos() {
+  unsigned long now = millis();
+  if (now - lastStepMs < STEP_INTERVAL_MS) return;
+  lastStepMs = now;
+
+  if (!servosAttached) return;
+
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    if (currentAngle[i] == targetAngle[i]) continue;
+
+    int delta = targetAngle[i] - currentAngle[i];
+    if (delta >  MAX_STEP_DEG) delta =  MAX_STEP_DEG;
+    if (delta < -MAX_STEP_DEG) delta = -MAX_STEP_DEG;
+
+    currentAngle[i] += delta;
+    servos[i].write(currentAngle[i]);
+  }
+}
+
+// Returns joint index for a name, or -1
+int jointIndex(const String &name) {
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    if (name.equals(JOINT_NAME[i])) return i;
+  }
+  return -1;
+}
+
+void setTarget(int i, int angle) {
+  targetAngle[i] = constrain(angle, JOINT_MIN[i], JOINT_MAX[i]);
+}
+
+// =====================================================================
+// WEB PAGE  (HTML + CSS + JS, stored in flash)
+// =====================================================================
+const char MAIN_PAGE[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>4-DOF Robotic Arm</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent;}
+body{margin:0;background:#f5f5f5;color:#171717;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+.app{width:100%;max-width:1050px;margin:auto;padding:18px;}
+.header{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;}
+.title{font-size:22px;font-weight:650;}
+.subtitle{font-size:12px;color:#777;margin-top:4px;}
+.status{display:flex;align-items:center;gap:7px;background:#fff;border:1px solid #e5e5e5;
+  padding:8px 12px;border-radius:20px;font-size:12px;}
+.dot{width:8px;height:8px;border-radius:50%;background:#20a35a;}
+.dot.busy{background:#e0a020;}
+.dot.lost{background:#c33;}
+.layout{display:grid;grid-template-columns:1.35fr 0.9fr;gap:16px;}
+.simulator{position:relative;min-height:560px;background:#fff;border:1px solid #e4e4e4;
+  border-radius:18px;overflow:hidden;}
+.sim-title{position:absolute;top:18px;left:20px;font-size:13px;font-weight:600;z-index:5;}
+canvas{width:100%;height:100%;min-height:560px;display:block;}
+.controls{background:#fff;border:1px solid #e4e4e4;border-radius:18px;padding:20px;}
+.controls-title{font-size:16px;font-weight:650;margin-bottom:5px;}
+.controls-subtitle{font-size:12px;color:#777;margin-bottom:22px;}
+.control{margin-bottom:25px;}
+.control-header{display:flex;justify-content:space-between;align-items:center;margin-bottom:9px;}
+.control-name{font-size:13px;font-weight:600;}
+.angle{min-width:45px;padding:4px 8px;border-radius:7px;background:#f3f3f3;
+  text-align:center;font-size:12px;font-weight:600;}
+input[type=range]{width:100%;height:5px;appearance:none;-webkit-appearance:none;
+  background:#dedede;border-radius:5px;outline:none;}
+input[type=range]::-webkit-slider-thumb{appearance:none;-webkit-appearance:none;
+  width:20px;height:20px;background:#171717;border-radius:50%;cursor:pointer;
+  border:3px solid #fff;box-shadow:0 1px 5px rgba(0,0,0,.25);}
+input[type=range]::-moz-range-thumb{width:20px;height:20px;background:#171717;
+  border-radius:50%;border:3px solid #fff;}
+.buttons{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px;}
+button{border:1px solid #ddd;background:#fff;border-radius:10px;padding:11px;
+  font-size:12px;cursor:pointer;}
+button:hover{background:#f4f4f4;}
+button:active{transform:translateY(1px);}
+.home{background:#171717;color:#fff;border-color:#171717;}
+.home:hover{background:#333;}
+@media(max-width:750px){
+  .layout{grid-template-columns:1fr;}
+  .simulator{min-height:400px;}
+  canvas{min-height:400px;}
+  .title{font-size:19px;}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <div class="header">
+    <div>
+      <div class="title">4-DOF Robotic Arm</div>
+      <div class="subtitle">ESP8266 &bull; Access Point Control</div>
+    </div>
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">Connected</span></div>
+  </div>
+
+  <div class="layout">
+
+    <div class="simulator">
+      <div class="sim-title">Virtual Arm</div>
+      <canvas id="armCanvas"></canvas>
+    </div>
+
+    <div class="controls">
+      <div class="controls-title">Servo Control</div>
+      <div class="controls-subtitle">Move the sliders to control the physical arm.</div>
+
+      <div class="control">
+        <div class="control-header"><span class="control-name">Base</span>
+          <span class="angle" id="baseValue">90&deg;</span></div>
+        <input id="base" type="range" min="0" max="180" value="90">
+      </div>
+
+      <div class="control">
+        <div class="control-header"><span class="control-name">Shoulder</span>
+          <span class="angle" id="shoulderValue">90&deg;</span></div>
+        <input id="shoulder" type="range" min="0" max="180" value="90">
+      </div>
+
+      <div class="control">
+        <div class="control-header"><span class="control-name">Elbow</span>
+          <span class="angle" id="elbowValue">90&deg;</span></div>
+        <input id="elbow" type="range" min="0" max="180" value="90">
+      </div>
+
+      <div class="control">
+        <div class="control-header"><span class="control-name">Gripper</span>
+          <span class="angle" id="gripperValue">90&deg;</span></div>
+        <input id="gripper" type="range" min="0" max="180" value="90">
+      </div>
+
+      <div class="buttons">
+        <button class="home" id="btnHome">Home Position</button>
+        <button id="btnOpen">Open Gripper</button>
+        <button id="btnClose">Close Gripper</button>
+        <button id="btnRelax">Relax Servos</button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+"use strict";
+
+var JOINTS = ["base","shoulder","elbow","gripper"];
+var angles = { base:90, shoulder:90, elbow:90, gripper:90 };
+var limits = {                       // overwritten by /state on load
+  base:{min:0,max:180}, shoulder:{min:0,max:180},
+  elbow:{min:0,max:180}, gripper:{min:0,max:180}
+};
+
+var dot = document.getElementById("dot");
+var statusText = document.getElementById("statusText");
+
+function setStatus(cls, text){
+  dot.className = "dot" + (cls ? " " + cls : "");
+  statusText.textContent = text;
+}
+
+/* -------------------------------------------------------------
+   REQUEST QUEUE
+   The ESP8266 serves one connection at a time. Never have more
+   than one request open; keep only the newest value per joint
+   and send it the moment the previous request completes.
+------------------------------------------------------------- */
+var inFlight = false;
+var pending  = {};        // joint name -> newest unsent angle
+var failures = 0;
+
+function pump(){
+  if (inFlight) return;
+  var names = Object.keys(pending);
+  if (!names.length) return;
+
+  var name  = names[0];
+  var value = pending[name];
+  delete pending[name];
+
+  inFlight = true;
+  fetch("/servo?name=" + name + "&angle=" + value)
+    .then(function(){
+      if (failures) { failures = 0; setStatus("", "Connected"); }
+    })
+    .catch(function(){
+      if (++failures > 2) setStatus("lost", "Reconnecting");
+    })
+    .then(function(){ inFlight = false; pump(); });
+}
+
+function send(name, value){
+  pending[name] = value;
+  pump();
+}
+
+/* Send all four joints in ONE request (used by Home). */
+function sendAll(values){
+  var q = JOINTS.map(function(n){ return n + "=" + values[n]; }).join("&");
+  fetch("/all?" + q).catch(function(){});
+}
+
+/* -------------------------------------------------------------
+   SLIDERS
+------------------------------------------------------------- */
+function applyAngle(name, value, push){
+  value = parseInt(value, 10);
+  angles[name] = value;
+  document.getElementById(name).value = value;
+  document.getElementById(name + "Value").textContent = value + "\u00B0";
+  requestDraw();
+  if (push) send(name, value);
+}
+
+JOINTS.forEach(function(name){
+  var el = document.getElementById(name);
+  el.addEventListener("input",  function(){ applyAngle(name, el.value, true); });
+  el.addEventListener("change", function(){ applyAngle(name, el.value, true); });
+});
+
+document.getElementById("btnHome").onclick = function(){
+  var v = { base:90, shoulder:90, elbow:90, gripper:90 };
+  JOINTS.forEach(function(n){ applyAngle(n, v[n], false); });
+  sendAll(v);
+};
+document.getElementById("btnOpen").onclick  = function(){ applyAngle("gripper", limits.gripper.min, true); };
+document.getElementById("btnClose").onclick = function(){ applyAngle("gripper", limits.gripper.max, true); };
+document.getElementById("btnRelax").onclick = function(){
+  fetch("/relax").catch(function(){});
+  setStatus("busy", "Relaxed");
+  setTimeout(function(){ setStatus("", "Connected"); }, 1500);
+};
+
+/* -------------------------------------------------------------
+   CANVAS SIMULATION
+------------------------------------------------------------- */
+var canvas = document.getElementById("armCanvas");
+var ctx    = canvas.getContext("2d");
+var drawQueued = false;
+
+function requestDraw(){
+  if (drawQueued) return;
+  drawQueued = true;
+  requestAnimationFrame(function(){ drawQueued = false; drawArm(); });
+}
+
+function resizeCanvas(){
+  var rect = canvas.getBoundingClientRect();
+  var dpr  = window.devicePixelRatio || 1;
+  canvas.width  = rect.width  * dpr;
+  canvas.height = rect.height * dpr;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);   // reset first — scale() is cumulative
+  ctx.scale(dpr, dpr);
+  drawArm();
+}
+window.addEventListener("resize", resizeCanvas);
+
+function drawJoint(x, y, r){
+  ctx.fillStyle = "#2473b9";
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI*2); ctx.fill();
+  ctx.fillStyle = "#111";
+  ctx.beginPath(); ctx.arc(x, y, r*0.3, 0, Math.PI*2); ctx.fill();
+}
+
+function drawArm(){
+  var rect = canvas.getBoundingClientRect();
+  var W = rect.width, H = rect.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // grid
+  ctx.strokeStyle = "#eee"; ctx.lineWidth = 1;
+  for (var x = 0; x < W; x += 35){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,H); ctx.stroke(); }
+  for (var y = 0; y < H; y += 35){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(W,y); ctx.stroke(); }
+
+  var baseX = W/2, baseY = H - 90;
+
+  // Base yaw: foreshortens horizontal reach, so the base slider is visible.
+  var yaw   = (angles.base - 90) * Math.PI/180;
+  var reach = Math.cos(yaw);
+
+  // base block
+  ctx.fillStyle = "#151515"; ctx.fillRect(baseX-75, baseY, 150, 38);
+  ctx.fillStyle = "#262626"; ctx.fillRect(baseX-45, baseY-18, 90, 20);
+
+  // top-view rotation dial
+  var dialX = baseX + 118, dialY = baseY + 12, dialR = 24;
+  ctx.strokeStyle = "#ddd"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.ellipse(dialX, dialY, dialR, dialR*0.45, 0, 0, Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = "#f28c18"; ctx.lineWidth = 3; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(dialX, dialY);
+  ctx.lineTo(dialX + Math.sin(yaw)*dialR, dialY - Math.cos(yaw)*dialR*0.45);
+  ctx.stroke();
+  ctx.fillStyle = "#999"; ctx.font = "10px sans-serif"; ctx.textAlign = "center";
+  ctx.fillText("base " + angles.base + "\u00B0", dialX, dialY + 26);
+  ctx.textAlign = "start";
+
+  // kinematics (side view)
+  var L1 = 145, L2 = 115;
+  var sh = (angles.shoulder - 90) * Math.PI/180;
+  var el = (angles.elbow    - 90) * Math.PI/180;
+
+  var shoulderX = baseX, shoulderY = baseY - 18;
+  var elbowX = shoulderX + Math.sin(sh)*L1*reach;
+  var elbowY = shoulderY - Math.cos(sh)*L1;
+
+  var wristRot = sh + el;
+  var wristX = elbowX + Math.sin(wristRot)*L2*reach;
+  var wristY = elbowY - Math.cos(wristRot)*L2;
+
+  // upper arm
+  ctx.strokeStyle = "#f28c18"; ctx.lineWidth = 24; ctx.lineCap = "round";
+  ctx.beginPath(); ctx.moveTo(shoulderX, shoulderY); ctx.lineTo(elbowX, elbowY); ctx.stroke();
+
+  // forearm
+  ctx.lineWidth = 20;
+  ctx.beginPath(); ctx.moveTo(elbowX, elbowY); ctx.lineTo(wristX, wristY); ctx.stroke();
+
+  drawJoint(shoulderX, shoulderY, 16);
+  drawJoint(elbowX, elbowY, 16);
+  drawJoint(wristX, wristY, 13);
+
+  // gripper — fingers open RELATIVE to the forearm direction
+  var gmin = limits.gripper.min, gmax = limits.gripper.max;
+  var t = (gmax > gmin) ? (angles.gripper - gmin) / (gmax - gmin) : 0.5;
+  var spread = (5 + t*38) * Math.PI/180;      // 5..43 degrees per finger
+  var fingerLen = 42;
+
+  ctx.strokeStyle = "#f28c18"; ctx.lineWidth = 9;
+  [ wristRot - spread, wristRot + spread ].forEach(function(a){
+    ctx.beginPath();
+    ctx.moveTo(wristX, wristY);
+    ctx.lineTo(wristX + Math.sin(a)*fingerLen, wristY - Math.cos(a)*fingerLen);
+    ctx.stroke();
+  });
+}
+
+/* -------------------------------------------------------------
+   LOAD LIMITS + CURRENT POSITION FROM THE BOARD
+------------------------------------------------------------- */
+fetch("/state")
+  .then(function(r){ return r.json(); })
+  .then(function(d){
+    JOINTS.forEach(function(n){
+      if (!d[n]) return;
+      limits[n] = { min: d[n].min, max: d[n].max };
+      var el = document.getElementById(n);
+      el.min = d[n].min;
+      el.max = d[n].max;
+      applyAngle(n, d[n].target, false);
+    });
+    resizeCanvas();
+  })
+  .catch(function(){ resizeCanvas(); });
+
+resizeCanvas();
+</script>
+</body>
+</html>
+)rawliteral";
+
+// =====================================================================
+// HTTP HANDLERS
+// =====================================================================
+void handleRoot() {
+  server.send_P(200, "text/html", MAIN_PAGE);
+}
+
+// /servo?name=elbow&angle=120
+void handleServo() {
+  if (!server.hasArg("name") || !server.hasArg("angle")) {
+    server.send(400, "text/plain", "Missing parameters");
+    return;
+  }
+
+  int i = jointIndex(server.arg("name"));
+  if (i < 0) {
+    server.send(400, "text/plain", "Unknown joint");
+    return;
+  }
+
+  attachServos();                            // undo a previous Relax
+  setTarget(i, server.arg("angle").toInt());
+  server.send(200, "text/plain", "OK");
+}
+
+// /all?base=90&shoulder=90&elbow=90&gripper=90   (one round trip)
+void handleAll() {
+  attachServos();
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    if (server.hasArg(JOINT_NAME[i])) {
+      setTarget(i, server.arg(JOINT_NAME[i]).toInt());
+    }
+  }
+  server.send(200, "text/plain", "OK");
+}
+
+// Current angle, commanded target and limits for every joint
+void handleState() {
+  char json[320];
+  int n = 0;
+  n += snprintf(json + n, sizeof(json) - n, "{");
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    n += snprintf(json + n, sizeof(json) - n,
+                  "%s\"%s\":{\"current\":%d,\"target\":%d,\"min\":%d,\"max\":%d}",
+                  (i ? "," : ""), JOINT_NAME[i],
+                  currentAngle[i], targetAngle[i], JOINT_MIN[i], JOINT_MAX[i]);
+  }
+  n += snprintf(json + n, sizeof(json) - n, ",\"attached\":%s}",
+                servosAttached ? "true" : "false");
+  server.send(200, "application/json", json);
+}
+
+// Cut drive power so the servos stop humming/holding.
+// NOTE: a heavy arm may sag under gravity when relaxed.
+// The next slider move re-attaches them automatically.
+void handleRelax() {
+  detachServos();
+  server.send(200, "text/plain", "RELAXED");
+}
+
+void handleNotFound() {
+  server.send(404, "text/plain", "Not found");
+}
+
+// =====================================================================
+// SETUP
+// =====================================================================
+void setup() {
+  Serial.begin(115200);
+  delay(300);
+
+  for (int i = 0; i < NUM_JOINTS; i++) {
+    currentAngle[i] = JOINT_HOME[i];
+    targetAngle[i]  = JOINT_HOME[i];
+  }
+  attachServos();
+
+  WiFi.persistent(false);      // don't wear out flash rewriting Wi-Fi config
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(AP_SSID, AP_PASSWORD, 1 /*channel*/, false /*hidden*/, 4 /*max clients*/);
+
+  Serial.println();
+  Serial.println(F("=============================="));
+  Serial.println(F("  4-DOF ROBOT ARM"));
+  Serial.println(F("=============================="));
+  Serial.print(F("WiFi SSID : ")); Serial.println(AP_SSID);
+  Serial.print(F("Password  : ")); Serial.println(AP_PASSWORD);
+  Serial.print(F("Open URL  : http://")); Serial.println(WiFi.softAPIP());
+  Serial.println(F("=============================="));
+
+  server.on("/",       HTTP_GET, handleRoot);
+  server.on("/servo",  HTTP_GET, handleServo);
+  server.on("/all",    HTTP_GET, handleAll);
+  server.on("/state",  HTTP_GET, handleState);
+  server.on("/relax",  HTTP_GET, handleRelax);
+  server.onNotFound(handleNotFound);
+  server.begin();
+
+  Serial.println(F("Web server started."));
+}
+
+// =====================================================================
+// LOOP
+// =====================================================================
+void loop() {
+  server.handleClient();
+  updateServos();      // non-blocking easing toward each target
+  yield();
+}

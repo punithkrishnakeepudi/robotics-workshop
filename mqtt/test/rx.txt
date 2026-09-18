@@ -1,0 +1,168 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+#include <Servo.h>
+
+// -------------------- SERVO --------------------
+Servo myservo;
+
+// -------------------- Wi-Fi --------------------
+const char* ssid = "IICLUB";
+const char* password = "012345678";
+
+// -------------------- MQTT --------------------
+const char* mqtt_broker = "test.mosquitto.org";
+const char* mqtt_topic = "sensor/ir1";
+const int mqtt_port = 1883;
+
+// -------------------- PINS --------------------
+const int ledPin = D2;
+const int servoPin = D4;
+
+// -------------------- MQTT CLIENT --------------------
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+
+// =================================================
+// MQTT CALLBACK
+// =================================================
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  // Convert MQTT payload into String
+  String message = "";
+
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+
+  Serial.print("Message arrived [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(message);
+
+
+  // -------------------- MESSAGE = 1 --------------------
+  if (message == "1") {
+
+    digitalWrite(ledPin, HIGH);
+    myservo.write(0);
+
+    Serial.println("LED ON");
+    Serial.println("Servo -> 0 degrees");
+  }
+
+
+  // -------------------- MESSAGE = 0 --------------------
+  else if (message == "0") {
+
+    digitalWrite(ledPin, LOW);
+    myservo.write(180);
+
+    Serial.println("LED OFF");
+    Serial.println("Servo -> 180 degrees");
+  }
+}
+
+
+// =================================================
+// CONNECT TO WIFI
+// =================================================
+void setup_wifi() {
+
+  Serial.println();
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+// =================================================
+// CONNECT TO MQTT
+// =================================================
+void reconnectMQTT() {
+
+  while (!client.connected()) {
+
+    Serial.print("Connecting to MQTT broker...");
+
+    // Create unique client ID
+    String client_id = "ESP8266-Receiver-";
+    client_id += WiFi.macAddress();
+
+    if (client.connect(client_id.c_str())) {
+
+      Serial.println(" connected!");
+
+      // Subscribe to topic
+      client.subscribe(mqtt_topic);
+
+      Serial.print("Subscribed to: ");
+      Serial.println(mqtt_topic);
+    }
+
+    else {
+
+      Serial.print(" failed, state = ");
+      Serial.println(client.state());
+
+      Serial.println("Retrying in 2 seconds...");
+
+      delay(2000);
+    }
+  }
+}
+
+
+// =================================================
+// SETUP
+// =================================================
+void setup() {
+
+  Serial.begin(115200);
+
+  // LED setup
+  pinMode(ledPin, OUTPUT);
+  digitalWrite(ledPin, LOW);
+
+  // Servo setup
+  myservo.attach(servoPin);
+  myservo.write(180);
+
+  // Connect to Wi-Fi
+  setup_wifi();
+
+  // Configure MQTT
+  client.setServer(mqtt_broker, mqtt_port);
+  client.setCallback(callback);
+
+  // Connect to MQTT
+  reconnectMQTT();
+}
+
+
+// =================================================
+// LOOP
+// =================================================
+void loop() {
+
+  // Reconnect if MQTT connection is lost
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+
+  // Keep MQTT connection alive
+  client.loop();
+}

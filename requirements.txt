@@ -1,0 +1,38 @@
+# grrr_workshop18sep - workshop requirements
+#
+# REQUIRES PYTHON 3.12 (not 3.13)
+#   mediapipe 0.10.21 ships no cp313 wheel. It is the last line that still has
+#   the mp.solutions API with models baked into the wheel, so scripts 3/4/5
+#   need no .task model downloads.
+#
+# Install:
+#   python3.12 -m venv .venv && source .venv/bin/activate
+#   pip install -r requirements.txt
+
+# cv2 for every script. The contrib build also ships the haarcascade_*.xml
+# files that script 2 loads, and is built with Qt5 so imshow() opens a window.
+opencv-contrib-python==4.11.0.86
+
+# ultralytics hard-requires opencv-python, and both packages unpack into the
+# same cv2/ folder. Keep this version IDENTICAL to opencv-contrib-python above,
+# and never install opencv-python-headless - a headless build has no GUI, so
+# imshow() raises "The function is not implemented. Rebuild the library with
+# GTK+ 2.x or Cocoa support".
+opencv-python==4.11.0.86
+
+# scripts 3, 4, 5 - pose and hand landmarks via mp.solutions
+mediapipe==0.10.21
+
+# script 5 - publishes hand state over MQTT to the ESP8266
+paho-mqtt==2.1.0
+
+# script 6 - YOLOv8 object detection (downloads yolov8n.pt on first run)
+ultralytics==8.4.155
+
+# mediapipe 0.10.21 requires numpy<2; ultralytics is fine with 1.x
+numpy==1.26.4
+
+# torch/torchvision arrive as ultralytics dependencies (~2 GB, CPU build here).
+# Pin them only if you need reproducible inference:
+# torch==2.14.0
+# torchvision==0.29.0

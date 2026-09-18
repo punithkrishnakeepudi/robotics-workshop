@@ -1,0 +1,137 @@
+#include <ESP8266WiFi.h>
+#include <PubSubClient.h>
+
+// -------------------- Wi-Fi --------------------
+const char* ssid = "IICLUB";
+const char* password = "012345678";
+
+// -------------------- MQTT --------------------
+const char* mqtt_broker = "test.mosquitto.org";
+const char* mqtt_topic = "sensor/ir1";
+const int mqtt_port = 1883;
+
+// -------------------- IR SENSOR --------------------
+const int irPin = D1;
+
+// -------------------- MQTT CLIENT --------------------
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+
+// =================================================
+// CONNECT TO WIFI
+// =================================================
+void setup_wifi() {
+
+  Serial.println();
+  Serial.print("Connecting to Wi-Fi: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println();
+  Serial.println("Wi-Fi connected!");
+
+  Serial.print("IP Address: ");
+  Serial.println(WiFi.localIP());
+}
+
+
+// =================================================
+// CONNECT TO MQTT
+// =================================================
+void reconnectMQTT() {
+
+  while (!client.connected()) {
+
+    Serial.print("Connecting to MQTT broker...");
+
+    // Create unique MQTT client ID
+    String client_id = "ESP8266-Publisher-";
+    client_id += WiFi.macAddress();
+
+    if (client.connect(client_id.c_str())) {
+
+      Serial.println(" connected!");
+
+      Serial.print("Publishing to: ");
+      Serial.println(mqtt_topic);
+    }
+
+    else {
+
+      Serial.print(" failed, state = ");
+      Serial.println(client.state());
+
+      Serial.println("Retrying in 2 seconds...");
+
+      delay(2000);
+    }
+  }
+}
+
+
+// =================================================
+// SETUP
+// =================================================
+void setup() {
+
+  Serial.begin(115200);
+
+  // IR sensor setup
+  pinMode(irPin, INPUT);
+
+  // Connect to Wi-Fi
+  setup_wifi();
+
+  // Configure MQTT
+  client.setServer(mqtt_broker, mqtt_port);
+
+  // Connect to MQTT broker
+  reconnectMQTT();
+}
+
+
+// =================================================
+// LOOP
+// =================================================
+void loop() {
+
+  // Reconnect if MQTT connection is lost
+  if (!client.connected()) {
+    reconnectMQTT();
+  }
+
+  // Keep MQTT connection alive
+  client.loop();
+
+
+  // -------------------- READ IR SENSOR --------------------
+
+  int irState = digitalRead(irPin);
+
+  Serial.print("IR Sensor: ");
+  Serial.println(irState);
+
+
+  // Convert value to String
+  String message = String(irState);
+
+
+  // -------------------- PUBLISH --------------------
+
+  client.publish(mqtt_topic, message.c_str());
+
+  Serial.print("Published: ");
+  Serial.println(message);
+
+
+  // Send every 2 seconds
+  delay(2000);
+}
