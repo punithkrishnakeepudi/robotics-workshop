@@ -1,0 +1,209 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+const char* ssid = "12";
+const char* password = "123456789";
+
+ESP8266WebServer server(80);
+
+#define LED_PIN D0
+
+int brightness = 0; // 0-255
+
+String getHTML() {
+  String html = R"====(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+
+<title>LED Control Dashboard</title>
+
+<style>
+
+body{
+    margin:0;
+    font-family:Arial,sans-serif;
+    background:#f2f4f8;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    height:100vh;
+}
+
+.card{
+    width:340px;
+    background:white;
+    padding:25px;
+    border-radius:15px;
+    text-align:center;
+    box-shadow:0 5px 20px rgba(0,0,0,0.15);
+}
+
+h2{
+    margin-top:0;
+}
+
+.led{
+    width:70px;
+    height:70px;
+    border-radius:50%;
+    background:#00ff00;
+    margin:20px auto;
+}
+
+button{
+    border:none;
+    padding:12px 24px;
+    border-radius:8px;
+    color:white;
+    cursor:pointer;
+    margin:5px;
+    font-size:16px;
+}
+
+.onBtn{
+    background:#28a745;
+}
+
+.offBtn{
+    background:#dc3545;
+}
+
+.slider{
+    width:100%;
+    margin-top:20px;
+    touch-action: pan-y;
+}
+
+.value{
+    font-size:22px;
+    font-weight:bold;
+    margin-top:10px;
+}
+
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+<h2>LED Control Dashboard</h2>
+
+<div id="led" class="led"></div>
+
+<div>
+<button class="onBtn" onclick="setBrightness(255)">ON</button>
+<button class="offBtn" onclick="setBrightness(0)">OFF</button>
+</div>
+
+<br>
+
+<input
+type="range"
+min="0"
+max="255"
+value="0"
+class="slider"
+id="brightnessSlider"
+oninput="sliderChanged(this.value)"
+onchange="sliderChanged(this.value)"
+>
+
+<div class="value">
+Brightness: <span id="value">0</span>
+</div>
+
+</div>
+
+<script>
+
+let timeout = null;
+
+function updateLedGlow(value){
+    let glow = value / 4;
+    const led = document.getElementById("led");
+    led.style.opacity = Math.max(0.15, value/255);
+    led.style.boxShadow =
+        `0 0 ${glow}px #00ff00,
+         0 0 ${glow*2}px #00ff00,
+         0 0 ${glow*4}px #00ff00`;
+}
+
+function sendBrightness(value) {
+    fetch(`/brightness?value=${value}`);
+}
+
+function sliderChanged(value){
+    document.getElementById("value").innerHTML = value;
+    updateLedGlow(value);
+
+    // Debounce to prevent flooding the ESP8266 web server while sliding smoothly
+    clearTimeout(timeout);
+    timeout = setTimeout(() => {
+        sendBrightness(value);
+    }, 50);
+}
+
+function setBrightness(value){
+    document.getElementById("brightnessSlider").value = value;
+    document.getElementById("value").innerHTML = value;
+    updateLedGlow(value);
+    sendBrightness(value);
+}
+
+updateLedGlow(0);
+
+</script>
+
+</body>
+</html>
+)====";
+
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", getHTML());
+}
+
+void handleBrightness() {
+  if (server.hasArg("value")) {
+    brightness = constrain(server.arg("value").toInt(), 0, 255);
+
+    // For regular external LEDs (Active HIGH):
+    // 255 -> Full brightness (ON)
+    // 0 -> Zero brightness (OFF)
+    analogWrite(LED_PIN, brightness);
+
+    Serial.print("Brightness Sent: ");
+    Serial.println(brightness);
+  }
+
+  server.send(200, "text/plain", "OK");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  analogWriteRange(255);
+
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+
+  Serial.println();
+  Serial.print("AP IP: ");
+  Serial.println(WiFi.softAPIP());
+
+  server.on("/", handleRoot);
+  server.on("/brightness", handleBrightness);
+
+  server.begin();
+  Serial.println("Server Started");
+}
+
+void loop() {
+  server.handleClient();
+}
