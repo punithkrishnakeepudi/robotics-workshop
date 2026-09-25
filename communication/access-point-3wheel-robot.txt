@@ -1,0 +1,221 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266WebServer.h>
+
+const char* ssid = "12";
+const char* password = "123456789";
+
+ESP8266WebServer server(80);
+
+// Define Motor Control Pins based on your mapping
+const int in1 = D3;
+const int en1 = D4;
+const int in2 = D8;
+
+const int in3 = D6;
+const int in4 = D5;
+const int en2 = D7;
+
+// Minimal HTML Web Interface with D-Pad controls
+String getHTML() {
+  String html = R"====(
+<!DOCTYPE html>
+<html>
+<head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vidhyantra Robot Control</title>
+<style>
+body {
+    margin: 0;
+    font-family: Arial, sans-serif;
+    background: #f2f4f8;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+}
+.card {
+    width: 320px;
+    background: white;
+    padding: 25px;
+    border-radius: 15px;
+    text-align: center;
+    box-shadow: 0 5px 20px rgba(0,0,0,0.15);
+}
+h2 {
+    margin-top: 0;
+    color: #333;
+}
+.control-pad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 12px;
+    margin-top: 25px;
+}
+button {
+    background: #007bff;
+    border: none;
+    padding: 18px 0;
+    border-radius: 10px;
+    color: white;
+    font-size: 20px;
+    font-weight: bold;
+    cursor: pointer;
+    box-shadow: 0 3px 6px rgba(0,0,0,0.1);
+    transition: background 0.1s;
+}
+button:active {
+    background: #0056b3;
+}
+.stopBtn {
+    background: #dc3545;
+}
+.stopBtn:active {
+    background: #a71d2a;
+}
+.empty {
+    background: transparent;
+    box-shadow: none;
+    cursor: default;
+}
+</style>
+</head>
+<body>
+
+<div class="card">
+    <h2>Robot Controller</h2>
+    
+    <div class="control-pad">
+        <div class="empty"></div>
+        <button onclick="sendCommand('forward')">&#9650;</button>
+        <div class="empty"></div>
+        
+        <button onclick="sendCommand('left')">&#9668;</button>
+        <button class="stopBtn" onclick="sendCommand('stop')">&#9632;</button>
+        <button onclick="sendCommand('right')">&#9658;</button>
+        
+        <div class="empty"></div>
+        <button onclick="sendCommand('backward')">&#9660;</button>
+        <div class="empty"></div>
+    </div>
+</div>
+
+<script>
+function sendCommand(cmd) {
+    fetch('/' + cmd);
+}
+</script>
+
+</body>
+</html>
+)====";
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", getHTML());
+}
+
+void handleForward() {
+  moveForward();
+  server.send(200, "text/plain", "Forward");
+}
+
+void handleBackward() {
+  moveBackward();
+  server.send(200, "text/plain", "Backward");
+}
+
+void handleLeft() {
+  turnLeft();
+  server.send(200, "text/plain", "Left");
+}
+
+void handleRight() {
+  turnRight();
+  server.send(200, "text/plain", "Right");
+}
+
+void handleStop() {
+  stopRobot();
+  server.send(200, "text/plain", "Stop");
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Set all motor control pins as outputs
+  pinMode(in1, OUTPUT);
+  pinMode(in2, OUTPUT);
+  pinMode(en1, OUTPUT);
+  pinMode(in3, OUTPUT);
+  pinMode(in4, OUTPUT);
+  pinMode(en2, OUTPUT);
+
+  // Keep both enable pins HIGH so motors run at full speed
+  digitalWrite(en1, HIGH);
+  digitalWrite(en2, HIGH);
+
+  stopRobot();
+
+  // Setup AP Mode
+  WiFi.mode(WIFI_AP);
+  WiFi.softAP(ssid, password);
+
+  Serial.println();
+  Serial.print("AP IP Address: ");
+  Serial.println(WiFi.softAPIP());
+
+  // Server Routing
+  server.on("/", handleRoot);
+  server.on("/forward", handleForward);
+  server.on("/backward", handleBackward);
+  server.on("/left", handleLeft);
+  server.on("/right", handleRight);
+  server.on("/stop", handleStop);
+
+  server.begin();
+  Serial.println("HTTP server started");
+}
+
+void loop() {
+  server.handleClient();
+}
+
+// --- Movement Functions ---
+
+void moveForward() {
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+}
+
+void moveBackward() {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+}
+
+void turnLeft() {
+  // Left motor backward, Right motor forward (Spin left)
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, HIGH);
+  digitalWrite(in3, HIGH);
+  digitalWrite(in4, LOW);
+}
+
+void turnRight() {
+  // Left motor forward, Right motor backward (Spin right)
+  digitalWrite(in1, HIGH);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, HIGH);
+}
+
+void stopRobot() {
+  digitalWrite(in1, LOW);
+  digitalWrite(in2, LOW);
+  digitalWrite(in3, LOW);
+  digitalWrite(in4, LOW);
+}
